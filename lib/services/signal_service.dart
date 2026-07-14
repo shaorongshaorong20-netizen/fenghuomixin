@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:get/get.dart';
@@ -45,6 +46,8 @@ class SignalService with WidgetsBindingObserver {
   AppLifecycleState? _appState;
   FlutterLocalNotificationsPlugin? _notifier;
   Map<String, dynamic>? _pendingNotificationPayload;
+  bool _foregroundIncomingRingtonePlaying = false;
+  AudioPlayer? _iosIncomingRingtonePlayer;
 
   int? _userId;
   String? _token;
@@ -84,6 +87,48 @@ class SignalService with WidgetsBindingObserver {
 
   bool _isForeground() {
     return _appState == AppLifecycleState.resumed;
+  }
+
+  void _playForegroundIncomingRingtoneIfNeeded() {
+    if (kIsWeb) return;
+    if (_foregroundIncomingRingtonePlaying) return;
+    _foregroundIncomingRingtonePlaying = true;
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      unawaited(_playIosForegroundIncomingRingtone());
+      return;
+    }
+    try {
+      FlutterRingtonePlayer().playRingtone();
+    } catch (_) {
+      _foregroundIncomingRingtonePlaying = false;
+    }
+  }
+
+  void _stopForegroundIncomingRingtone() {
+    if (!_foregroundIncomingRingtonePlaying) return;
+    _foregroundIncomingRingtonePlaying = false;
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      final AudioPlayer? player = _iosIncomingRingtonePlayer;
+      if (player != null) {
+        unawaited(player.stop());
+      }
+      return;
+    }
+    try {
+      FlutterRingtonePlayer().stop();
+    } catch (_) {}
+  }
+
+  Future<void> _playIosForegroundIncomingRingtone() async {
+    try {
+      final AudioPlayer player = _iosIncomingRingtonePlayer ??= AudioPlayer(
+        playerId: 'ios_incoming_call_ringtone',
+      );
+      await player.setReleaseMode(ReleaseMode.loop);
+      await player.play(AssetSource('audio/incoming_call.wav'));
+    } catch (_) {
+      _foregroundIncomingRingtonePlaying = false;
+    }
   }
 
   Future<void> _playWindowsSystemMessageBeep() async {
@@ -566,6 +611,8 @@ class SignalService with WidgetsBindingObserver {
                       channelId: channelId,
                     );
                   } catch (_) {}
+                } else {
+                  _playForegroundIncomingRingtoneIfNeeded();
                 }
               }
             } else if (type == 'new_message') {
@@ -658,6 +705,13 @@ class SignalService with WidgetsBindingObserver {
               }
             }
 
+            if (type == 'accept' ||
+                type == 'hangup' ||
+                type == 'reject' ||
+                type == 'call_failed') {
+              _stopForegroundIncomingRingtone();
+            }
+
             if (type == 'hangup' || type == 'reject') {
               final String callId =
                   (decoded['callId'] ??
@@ -693,6 +747,7 @@ class SignalService with WidgetsBindingObserver {
   }
 
   void _handleDisconnected() {
+    _stopForegroundIncomingRingtone();
     _channel = null;
     _sub?.cancel();
     _sub = null;
@@ -705,6 +760,7 @@ class SignalService with WidgetsBindingObserver {
   }
 
   Future<void> disconnect() async {
+    _stopForegroundIncomingRingtone();
     final WebSocketChannel? channel = _channel;
     _channel = null;
     await _sub?.cancel();
@@ -769,18 +825,21 @@ class SignalService with WidgetsBindingObserver {
   }
 
   void sendAccept(String callId, {int? toId}) {
+    _stopForegroundIncomingRingtone();
     final Map<String, dynamic> payload = {'type': 'accept', 'callId': callId};
     if (toId != null) payload['toId'] = toId;
     _channel?.sink.add(jsonEncode(payload));
   }
 
   void sendReject(String callId, {int? toId}) {
+    _stopForegroundIncomingRingtone();
     final Map<String, dynamic> payload = {'type': 'reject', 'callId': callId};
     if (toId != null) payload['toId'] = toId;
     _channel?.sink.add(jsonEncode(payload));
   }
 
   void sendHangup(String callId, {int? toId}) {
+    _stopForegroundIncomingRingtone();
     final Map<String, dynamic> payload = {'type': 'hangup', 'callId': callId};
     if (toId != null) payload['toId'] = toId;
     _channel?.sink.add(jsonEncode(payload));

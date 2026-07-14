@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -66,12 +67,158 @@ class _ChatRouteErrorPage extends StatelessWidget {
   }
 }
 
-class _ChatPageState extends State<ChatPage> {
+class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   static const String _baseUrl = 'https://fenghuomixin.online';
   static const int _pageSize = 50;
   static const String _localSendStatusSending = 'sending';
   static const String _localSendStatusSent = 'sent';
   static const String _localSendStatusFailed = 'failed';
+  static const List<_EmojiCategory> _emojiCategories = <_EmojiCategory>[
+    _EmojiCategory('表情', <String>[
+      '😀',
+      '😃',
+      '😄',
+      '😁',
+      '😆',
+      '😅',
+      '😂',
+      '🤣',
+      '😉',
+      '😊',
+      '🙂',
+      '🙃',
+      '😍',
+      '😘',
+    ]),
+    _EmojiCategory('爱心', <String>[
+      '❤️',
+      '🩷',
+      '🧡',
+      '💛',
+      '💚',
+      '💙',
+      '💜',
+      '🤍',
+      '🖤',
+      '🤎',
+      '💔',
+      '❣️',
+      '💕',
+      '💞',
+    ]),
+    _EmojiCategory('手势', <String>[
+      '👍',
+      '👎',
+      '👏',
+      '🙏',
+      '🤝',
+      '✋',
+      '👌',
+      '🤙',
+      '👋',
+      '🤞',
+      '✌️',
+      '🤟',
+      '👊',
+      '🫶',
+    ]),
+    _EmojiCategory('动物', <String>[
+      '🐶',
+      '🐱',
+      '🐭',
+      '🐹',
+      '🐰',
+      '🦊',
+      '🐻',
+      '🐼',
+      '🐨',
+      '🐯',
+      '🦁',
+      '🐮',
+      '🐷',
+      '🐸',
+    ]),
+    _EmojiCategory('食物', <String>[
+      '🍎',
+      '🍊',
+      '🍋',
+      '🍉',
+      '🍇',
+      '🍓',
+      '🍒',
+      '🍑',
+      '🍍',
+      '🍔',
+      '🍟',
+      '🍕',
+      '🍗',
+      '🍜',
+    ]),
+    _EmojiCategory('运动', <String>[
+      '⚽',
+      '🏀',
+      '🏈',
+      '⚾',
+      '🎾',
+      '🏐',
+      '🏓',
+      '🏸',
+      '🥊',
+      '🥋',
+      '⛳',
+      '🏃',
+      '🚴',
+      '🏊',
+    ]),
+    _EmojiCategory('交通', <String>[
+      '🚗',
+      '🚕',
+      '🚙',
+      '🚌',
+      '🚎',
+      '🏎️',
+      '🚓',
+      '🚑',
+      '🚒',
+      '🚚',
+      '🚲',
+      '🛵',
+      '✈️',
+      '🚆',
+    ]),
+    _EmojiCategory('自然', <String>[
+      '🌍',
+      '🌎',
+      '🌏',
+      '🌞',
+      '🌙',
+      '⭐️',
+      '☁️',
+      '⛅',
+      '🌈',
+      '🔥',
+      '❄️',
+      '🌧️',
+      '🌊',
+      '🌸',
+    ]),
+    _EmojiCategory('节日', <String>[
+      '🎉',
+      '🎊',
+      '🎈',
+      '🎁',
+      '🎂',
+      '🍰',
+      '🕯️',
+      '🎄',
+      '🧧',
+      '🎆',
+      '🎇',
+      '🎃',
+      '🎅',
+      '🐉',
+    ]),
+  ];
   static const MethodChannel _galleryChannel = MethodChannel('fenghuo/gallery');
   static const MethodChannel _windowsChatDropChannel = MethodChannel(
     'fenghuo/windows_chat_drop',
@@ -82,6 +229,7 @@ class _ChatPageState extends State<ChatPage> {
   final ScrollController _scrollController = ScrollController();
 
   Timer? _timer;
+  StreamSubscription<SignalEvent>? _signalSub;
   bool _loading = true;
   bool _fetching = false;
   int _lastMarkedMessageId = 0;
@@ -95,6 +243,10 @@ class _ChatPageState extends State<ChatPage> {
   bool _loadingOlder = false;
   bool _reachedStart = false;
   bool _calling = false;
+  double _lastKeyboardInsetBottom = 0;
+  Timer? _keyboardScrollTimer;
+  Timer? _readBatchTimer;
+  final Set<int> _pendingReadMessageIds = <int>{};
 
   String? _token;
   int? _userId;
@@ -111,9 +263,15 @@ class _ChatPageState extends State<ChatPage> {
   final Map<int, GlobalKey> _messageKeys = <int, GlobalKey>{};
   int _nextLocalMessageId = -1;
 
+  bool get _shouldHandleSoftKeyboardLifecycle =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _peerDisplayName = SignalService.instance.displayNameForPeer(
       widget.peerId,
       fallback: widget.peerUsername,
@@ -124,8 +282,57 @@ class _ChatPageState extends State<ChatPage> {
         _handleWindowsDropMethodCall,
       );
     }
+    _inputFocusNode.addListener(_handleInputFocusChanged);
     _scrollController.addListener(_handleScroll);
+    _signalSub = SignalService.instance.listen().listen(_handleSignalEvent);
     _bootstrap();
+  }
+
+  void _handleInputFocusChanged() {
+    if (!_shouldHandleSoftKeyboardLifecycle || !_inputFocusNode.hasFocus) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_inputFocusNode.hasFocus) {
+        return;
+      }
+      _scrollToBottom(force: true);
+    });
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    if (!_shouldHandleSoftKeyboardLifecycle || !mounted) {
+      return;
+    }
+    final Iterable<ui.FlutterView> views =
+        WidgetsBinding.instance.platformDispatcher.views;
+    if (views.isEmpty) {
+      return;
+    }
+    final ui.FlutterView view = views.first;
+    final double keyboardInsetBottom =
+        view.viewInsets.bottom / view.devicePixelRatio;
+    final bool keyboardOpening =
+        _lastKeyboardInsetBottom <= 0 && keyboardInsetBottom > 0;
+    _lastKeyboardInsetBottom = keyboardInsetBottom;
+    if (!keyboardOpening) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_inputFocusNode.hasFocus) {
+        return;
+      }
+      _scrollToBottom(force: true);
+    });
+    _keyboardScrollTimer?.cancel();
+    _keyboardScrollTimer = Timer(const Duration(milliseconds: 150), () {
+      if (!mounted || !_inputFocusNode.hasFocus) {
+        return;
+      }
+      _scrollToBottom(force: true);
+    });
   }
 
   Future<void> _bootstrap() async {
@@ -164,6 +371,54 @@ class _ChatPageState extends State<ChatPage> {
       _scrollToBottom(force: true);
     });
     _startMessagePolling();
+  }
+
+  void _handleSignalEvent(SignalEvent event) {
+    if (!mounted) return;
+    if (event.type == 'new_message') {
+      final int? fromId = int.tryParse((event.data['fromId'] ?? '').toString());
+      if (fromId == null || fromId != widget.peerId) return;
+      final int messageId =
+          int.tryParse((event.data['messageId'] ?? '').toString()) ?? 0;
+      if (messageId <= 0) return;
+      if (!_isChatPageVisible || _userId == null) return;
+      _scheduleReadBatch(messageIds: <int>[messageId]);
+      return;
+    }
+    if (event.type != 'message_read') return;
+    final String conversationId = (event.data['conversationId'] ?? '')
+        .toString()
+        .trim();
+    if (conversationId.isEmpty || conversationId != _conversationId) return;
+    final List<dynamic> rawIds = event.data['messageIds'] is List
+        ? (event.data['messageIds'] as List<dynamic>)
+        : const <dynamic>[];
+    final List<int> messageIds = rawIds
+        .map((dynamic value) => int.tryParse(value.toString()) ?? 0)
+        .where((int value) => value > 0)
+        .toList();
+    if (messageIds.isEmpty) return;
+    final String readAt = (event.data['readAt'] ?? '').toString().trim();
+    _applyReadStateToMessages(messageIds, readAt: readAt);
+  }
+
+  bool get _isChatPageVisible {
+    if (!mounted) return false;
+    final AppLifecycleState? lifecycleState =
+        WidgetsBinding.instance.lifecycleState;
+    if (lifecycleState != null && lifecycleState != AppLifecycleState.resumed) {
+      return false;
+    }
+    final ModalRoute<dynamic>? route = ModalRoute.of(context);
+    return route == null || route.isCurrent;
+  }
+
+  String get _conversationId {
+    final int? userId = _userId;
+    if (userId == null) return '';
+    final int a = userId < widget.peerId ? userId : widget.peerId;
+    final int b = userId < widget.peerId ? widget.peerId : userId;
+    return '${a}_$b';
   }
 
   void _startMessagePolling() {
@@ -802,7 +1057,7 @@ class _ChatPageState extends State<ChatPage> {
   String _sendStatusText(String raw) {
     return switch (raw) {
       _localSendStatusSending => '发送中…',
-      _localSendStatusSent => '✓',
+      _localSendStatusSent => '已发送',
       _localSendStatusFailed => '发送失败',
       _ => '',
     };
@@ -813,6 +1068,135 @@ class _ChatPageState extends State<ChatPage> {
       _localSendStatusFailed => const Color(0xFFD98F8F),
       _ => const Color(0xFF6F7785),
     };
+  }
+
+  int _messageId(Map<String, dynamic> message) {
+    return int.tryParse(
+          (message['id'] ?? message['message_id'] ?? message['messageId'] ?? '')
+              .toString(),
+        ) ??
+        0;
+  }
+
+  int? _messageSenderId(Map<String, dynamic> message) {
+    return int.tryParse(
+      (message['sender_id'] ?? message['senderId'] ?? '').toString(),
+    );
+  }
+
+  String _messageReadAt(Map<String, dynamic> message) {
+    return (message['read_at'] ?? message['readAt'] ?? '').toString().trim();
+  }
+
+  String _bubbleStatusText(Map<String, dynamic> message, {required bool isMe}) {
+    if (!isMe) return '';
+    final String localStatus = (message['local_status'] ?? '').toString();
+    if (localStatus.isNotEmpty) return _sendStatusText(localStatus);
+    return _messageReadAt(message).isNotEmpty ? '已读' : '已发送';
+  }
+
+  Color _bubbleStatusColor(Map<String, dynamic> message) {
+    final String localStatus = (message['local_status'] ?? '').toString();
+    return _sendStatusColor(localStatus);
+  }
+
+  List<int> _collectUnreadIncomingMessageIds(
+    Iterable<Map<String, dynamic>> list,
+  ) {
+    final int? userId = _userId;
+    if (userId == null) return const <int>[];
+    final Set<int> ids = <int>{};
+    for (final Map<String, dynamic> message in list) {
+      final int id = _messageId(message);
+      final int? senderId = _messageSenderId(message);
+      if (id <= 0 || senderId == null || senderId == userId) continue;
+      if (_messageReadAt(message).isNotEmpty) continue;
+      ids.add(id);
+    }
+    return ids.toList()..sort();
+  }
+
+  void _applyReadStateToMessages(Iterable<int> messageIds, {String? readAt}) {
+    if (!mounted) return;
+    final Set<int> targetIds = messageIds.where((int id) => id > 0).toSet();
+    if (targetIds.isEmpty) return;
+    final String effectiveReadAt = (readAt ?? '').trim().isNotEmpty
+        ? readAt!.trim()
+        : DateTime.now().toIso8601String();
+    bool changed = false;
+    final List<Map<String, dynamic>> next = _messages.map((message) {
+      final int id = _messageId(message);
+      if (!targetIds.contains(id)) return message;
+      if (_messageReadAt(message).isNotEmpty) return message;
+      changed = true;
+      final Map<String, dynamic> updated = Map<String, dynamic>.from(message);
+      updated['read_at'] = effectiveReadAt;
+      return updated;
+    }).toList();
+    if (!changed) return;
+    setState(() {
+      _messages = next;
+    });
+  }
+
+  void _scheduleReadBatch({
+    Iterable<int> messageIds = const <int>[],
+    Duration delay = const Duration(milliseconds: 150),
+  }) {
+    if (!_isChatPageVisible) return;
+    final int? userId = _userId;
+    if (userId == null) return;
+    for (final int id in messageIds) {
+      if (id > 0) _pendingReadMessageIds.add(id);
+    }
+    _pendingReadMessageIds.addAll(_collectUnreadIncomingMessageIds(_messages));
+    if (_pendingReadMessageIds.isEmpty) return;
+    _readBatchTimer?.cancel();
+    _readBatchTimer = Timer(delay, () {
+      unawaited(_flushPendingReadBatch());
+    });
+  }
+
+  Future<void> _flushPendingReadBatch() async {
+    _readBatchTimer?.cancel();
+    _readBatchTimer = null;
+    if (!mounted || !_isChatPageVisible) return;
+    final int? userId = _userId;
+    final String conversationId = _conversationId;
+    if (userId == null || conversationId.isEmpty) return;
+    final List<int> messageIds = _pendingReadMessageIds.toList()..sort();
+    _pendingReadMessageIds.clear();
+    if (messageIds.isEmpty) return;
+    try {
+      final Uri url = Uri.parse('$_baseUrl/api/messages/readBatch');
+      final http.Response res = await http.post(
+        url,
+        headers: _headers(),
+        body: jsonEncode({
+          'userId': userId,
+          'conversationId': conversationId,
+          'messageIds': messageIds,
+        }),
+      );
+      if (res.statusCode == 401) {
+        Get.offAllNamed('/login');
+        return;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      final dynamic decoded = jsonDecode(res.body);
+      final List<dynamic> rawIds =
+          decoded is Map<String, dynamic> && decoded['messageIds'] is List
+          ? decoded['messageIds'] as List<dynamic>
+          : const <dynamic>[];
+      final List<int> confirmedIds = rawIds
+          .map((dynamic value) => int.tryParse(value.toString()) ?? 0)
+          .where((int value) => value > 0)
+          .toList();
+      final String readAt = decoded is Map<String, dynamic>
+          ? (decoded['readAt'] ?? '').toString().trim()
+          : '';
+      _applyReadStateToMessages(confirmedIds, readAt: readAt);
+    } catch (_) {}
   }
 
   Future<String?> _saveImageBytesToGallery(
@@ -1323,6 +1707,7 @@ class _ChatPageState extends State<ChatPage> {
       int maxId = 0;
       String lastTs = '';
       int revoked = 0;
+      int readCount = 0;
       int minId = 0;
       for (final m in next) {
         final int id = int.tryParse((m['id'] ?? '').toString()) ?? 0;
@@ -1333,9 +1718,13 @@ class _ChatPageState extends State<ChatPage> {
         if ((m['is_revoked'] ?? m['isRevoked'] ?? 0).toString() == '1') {
           revoked += 1;
         }
+        if (_messageReadAt(m).isNotEmpty) {
+          readCount += 1;
+        }
       }
 
-      final String signature = '${next.length}_${maxId}_${lastTs}_$revoked';
+      final String signature =
+          '${next.length}_${maxId}_${lastTs}_${revoked}_$readCount';
       if (signature == _messageSignature) {
         if (maxId > _lastMarkedMessageId) {
           _lastMarkedMessageId = maxId;
@@ -1613,19 +2002,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _markRead() async {
-    final int? userId = _userId;
-    if (userId == null) return;
-    try {
-      final Uri url = Uri.parse('$_baseUrl/api/messages/read');
-      final http.Response res = await http.post(
-        url,
-        headers: _headers(),
-        body: jsonEncode({'userId': userId, 'peerId': widget.peerId}),
-      );
-      if (res.statusCode == 401) {
-        Get.offAllNamed('/login');
-      }
-    } catch (_) {}
+    _scheduleReadBatch();
   }
 
   Future<void> _pickFromGallery() async {
@@ -1929,73 +2306,31 @@ class _ChatPageState extends State<ChatPage> {
           ),
           builder: (context) {
             return DefaultTabController(
-              length: 3,
+              length: _emojiCategories.length,
               child: SizedBox(
-                height: 300,
+                height: 360,
                 child: Column(
                   children: [
-                    const TabBar(
-                      tabs: [
-                        Tab(text: '默认表情'),
-                        Tab(text: '符号表情'),
-                        Tab(text: '手势表情'),
-                      ],
+                    TabBar(
+                      isScrollable: true,
+                      tabs: _emojiCategories
+                          .map((category) => Tab(text: category.title))
+                          .toList(),
                     ),
                     Expanded(
                       child: TabBarView(
-                        children: [
-                          _EmojiGrid(
-                            emojis: const [
-                              '😀',
-                              '😄',
-                              '😆',
-                              '😉',
-                              '😍',
-                              '😭',
-                              '😡',
-                              '🤔',
-                            ],
-                            onTap: (emoji) {
-                              _insertEmoji(emoji);
-                              setState(() {});
-                              Navigator.of(context).pop();
-                            },
-                          ),
-                          _EmojiGrid(
-                            emojis: const [
-                              '❤️',
-                              '✨',
-                              '⭐️',
-                              '🔥',
-                              '🎉',
-                              '✅',
-                              '❌',
-                              '⚠️',
-                            ],
-                            onTap: (emoji) {
-                              _insertEmoji(emoji);
-                              setState(() {});
-                              Navigator.of(context).pop();
-                            },
-                          ),
-                          _EmojiGrid(
-                            emojis: const [
-                              '👍',
-                              '👎',
-                              '👏',
-                              '🙏',
-                              '🤝',
-                              '✋',
-                              '👌',
-                              '🤙',
-                            ],
-                            onTap: (emoji) {
-                              _insertEmoji(emoji);
-                              setState(() {});
-                              Navigator.of(context).pop();
-                            },
-                          ),
-                        ],
+                        children: _emojiCategories
+                            .map(
+                              (category) => _EmojiGrid(
+                                emojis: category.emojis,
+                                onTap: (emoji) {
+                                  _insertEmoji(emoji);
+                                  setState(() {});
+                                  Navigator.of(context).pop();
+                                },
+                              ),
+                            )
+                            .toList(),
                       ),
                     ),
                   ],
@@ -2372,13 +2707,18 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     CallState.isInCall.removeListener(_handleCallStateChanged);
     _stopMessagePolling();
     SignalService.instance.setActivePeer(null);
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
       _windowsChatDropChannel.setMethodCallHandler(null);
     }
+    _keyboardScrollTimer?.cancel();
+    _readBatchTimer?.cancel();
+    _signalSub?.cancel();
     _inputController.dispose();
+    _inputFocusNode.removeListener(_handleInputFocusChanged);
     _inputFocusNode.dispose();
     _scrollController.removeListener(_handleScroll);
     _scrollController.dispose();
@@ -2505,11 +2845,10 @@ class _ChatPageState extends State<ChatPage> {
                                         '')
                                     .toString()
                                     .trim();
-                            final String localStatus =
-                                (msg['local_status'] ?? '').toString();
-                            final String sendStatusText = isMe
-                                ? _sendStatusText(localStatus)
-                                : '';
+                            final String sendStatusText = _bubbleStatusText(
+                              msg,
+                              isMe: isMe,
+                            );
                             final String timestampText = _formatBubbleTime(
                               (msg['timestamp'] ?? '').toString(),
                             );
@@ -2524,6 +2863,14 @@ class _ChatPageState extends State<ChatPage> {
                             final GlobalKey? k = msgId > 0
                                 ? (_messageKeys[msgId] ??= GlobalKey())
                                 : null;
+                            final bool enableDesktopSecondaryTap =
+                                !kIsWeb &&
+                                (defaultTargetPlatform ==
+                                        TargetPlatform.windows ||
+                                    defaultTargetPlatform ==
+                                        TargetPlatform.macOS ||
+                                    defaultTargetPlatform ==
+                                        TargetPlatform.linux);
                             return Container(
                               key: k,
                               child: _ChatBubble(
@@ -2546,7 +2893,7 @@ class _ChatPageState extends State<ChatPage> {
                                     : null,
                                 timestampText: timestampText,
                                 sendStatusText: sendStatusText,
-                                sendStatusColor: _sendStatusColor(localStatus),
+                                sendStatusColor: _bubbleStatusColor(msg),
                                 onTapReply: replyToId > 0
                                     ? () => _scrollToMessage(replyToId)
                                     : null,
@@ -2587,6 +2934,10 @@ class _ChatPageState extends State<ChatPage> {
                                 onLongPress: msgId > 0
                                     ? () => _showMessageActions(msg)
                                     : () {},
+                                onSecondaryTap:
+                                    msgId > 0 && enableDesktopSecondaryTap
+                                    ? () => _showMessageActions(msg)
+                                    : null,
                               ),
                             );
                           },
@@ -2745,26 +3096,40 @@ class _EmojiGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GridView.builder(
-      padding: const EdgeInsets.all(12),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 8,
-        mainAxisSpacing: 8,
-        crossAxisSpacing: 8,
-      ),
-      itemCount: emojis.length,
-      itemBuilder: (context, index) {
-        final String emoji = emojis[index];
-        return InkResponse(
-          onTap: () => onTap(emoji),
-          radius: 22,
-          child: Center(
-            child: Text(emoji, style: const TextStyle(fontSize: 20)),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final int crossAxisCount = constraints.maxWidth >= 900
+            ? 12
+            : (constraints.maxWidth >= 600 ? 10 : 9);
+        return GridView.builder(
+          padding: const EdgeInsets.all(10),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: crossAxisCount,
+            mainAxisSpacing: 6,
+            crossAxisSpacing: 6,
           ),
+          itemCount: emojis.length,
+          itemBuilder: (context, index) {
+            final String emoji = emojis[index];
+            return InkResponse(
+              onTap: () => onTap(emoji),
+              radius: 22,
+              child: Center(
+                child: Text(emoji, style: const TextStyle(fontSize: 20)),
+              ),
+            );
+          },
         );
       },
     );
   }
+}
+
+class _EmojiCategory {
+  final String title;
+  final List<String> emojis;
+
+  const _EmojiCategory(this.title, this.emojis);
 }
 
 class _PlusMenuItem extends StatelessWidget {
@@ -2822,6 +3187,7 @@ class _ChatBubble extends StatelessWidget {
   final bool isLink;
   final VoidCallback? onTap;
   final VoidCallback onLongPress;
+  final VoidCallback? onSecondaryTap;
 
   const _ChatBubble({
     required this.isMe,
@@ -2840,6 +3206,7 @@ class _ChatBubble extends StatelessWidget {
     required this.isLink,
     required this.onTap,
     required this.onLongPress,
+    required this.onSecondaryTap,
   });
 
   @override
@@ -2861,6 +3228,7 @@ class _ChatBubble extends StatelessWidget {
                 GestureDetector(
                   onTap: onTap,
                   onLongPress: onLongPress,
+                  onSecondaryTap: onSecondaryTap,
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,

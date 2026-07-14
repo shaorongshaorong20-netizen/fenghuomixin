@@ -79,6 +79,7 @@ async function initDb() {
       sender_id INTEGER NOT NULL,
       content TEXT,
       reply_to_id INTEGER,
+      read_at TEXT NULL,
       is_deleted INTEGER NOT NULL DEFAULT 0,
       is_revoked INTEGER NOT NULL DEFAULT 0,
       timestamp TEXT NOT NULL DEFAULT (datetime('now'))
@@ -87,6 +88,9 @@ async function initDb() {
 
   try {
     await run(`ALTER TABLE messages ADD COLUMN reply_to_id INTEGER;`);
+  } catch (_) {}
+  try {
+    await run(`ALTER TABLE messages ADD COLUMN read_at TEXT NULL;`);
   } catch (_) {}
 
   await run(`

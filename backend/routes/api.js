@@ -1574,6 +1574,140 @@ router.post('/api/messages/read', authRequired, async (req, res) => {
   }
 });
 
+router.post('/api/messages/readBatch', authRequired, async (req, res) => {
+  try {
+    const userId = Number(req.body.userId ?? req.user?.userId);
+    const conversationId = (req.body.conversationId ?? '').toString().trim();
+    const rawIds = Array.isArray(req.body.messageIds) ? req.body.messageIds : [];
+    if (!userId || !conversationId || rawIds.length === 0) {
+      return res.status(400).json({ message: '参数错误' });
+    }
+    if (!req.user || Number(req.user.userId) !== userId) {
+      return res.status(403).json({ message: '无权限' });
+    }
+    const conversationParts = conversationId
+      .split('_')
+      .map((part) => Number(part))
+      .filter((part) => Number.isInteger(part) && part > 0);
+    if (conversationParts.length !== 2 || !conversationParts.includes(userId)) {
+      return res.status(403).json({ message: '无权限' });
+    }
+
+    const messageIds = Array.from(
+      new Set(
+        rawIds
+          .map((v) => Number(v))
+          .filter((v) => Number.isInteger(v) && v > 0)
+      )
+    );
+    if (messageIds.length === 0) {
+      return res.json({ ok: true, messageIds: [] });
+    }
+
+    const placeholders = messageIds.map(() => '?').join(', ');
+    const rows = await all(
+      `
+      SELECT id, sender_id, read_at
+      FROM messages
+      WHERE conversation_id = ?
+        AND id IN (${placeholders})
+        AND is_deleted = 0
+        AND is_revoked = 0;
+      `,
+      [conversationId, ...messageIds]
+    );
+
+    const readable = [];
+    let senderId = null;
+    for (const row of rows || []) {
+      const id = Number(row && row.id);
+      const currentSenderId = Number(row && row.sender_id);
+      if (!id || !currentSenderId) continue;
+      if (currentSenderId === userId) continue;
+      if ((row && row.read_at ? String(row.read_at) : '').trim().isNotEmpty) {
+        continue;
+      }
+      readable.push(id);
+      if (senderId == null) {
+        senderId = currentSenderId;
+      }
+    }
+
+    if (readable.length === 0) {
+      return res.json({ ok: true, messageIds: [] });
+    }
+
+    const updatePlaceholders = readable.map(() => '?').join(', ');
+    await run(
+      `
+      UPDATE messages
+      SET read_at = datetime('now')
+      WHERE conversation_id = ?
+        AND id IN (${updatePlaceholders})
+        AND sender_id != ?
+        AND read_at IS NULL;
+      `,
+      [conversationId, ...readable, userId]
+    );
+
+    const maxRow = await get(
+      `
+      SELECT MAX(id) AS maxId
+      FROM messages
+      WHERE conversation_id = ?
+        AND is_deleted = 0
+        AND is_revoked = 0
+        AND sender_id != ?;
+      `,
+      [conversationId, userId]
+    );
+    const maxId = Number(maxRow && maxRow.maxId ? maxRow.maxId : 0);
+    await run(
+      `
+      INSERT OR REPLACE INTO conversation_reads (user_id, conversation_id, last_read_id, updated_at)
+      VALUES (?, ?, ?, datetime('now'));
+      `,
+      [userId, conversationId, maxId]
+    );
+
+    const readRows = await all(
+      `
+      SELECT id, read_at
+      FROM messages
+      WHERE conversation_id = ?
+        AND id IN (${updatePlaceholders});
+      `,
+      [conversationId, ...readable]
+    );
+    let readAt = '';
+    for (const row of readRows || []) {
+      if (!readAt && row && row.read_at) {
+        readAt = toChinaTimeString(row.read_at);
+      }
+    }
+
+    if (senderId != null) {
+      try {
+        sendToUser(senderId, {
+          type: 'message_read',
+          conversationId,
+          messageIds: readable,
+          readAt: readAt || null,
+        });
+      } catch (_) {}
+    }
+
+    return res.json({
+      ok: true,
+      messageIds: readable,
+      readAt: readAt || null,
+      lastReadId: maxId,
+    });
+  } catch (_) {
+    return res.status(500).json({ message: '操作失败' });
+  }
+});
+
 router.get('/api/conversations', authRequired, async (req, res) => {
   try {
     const userId = Number(req.query.userId);
@@ -1708,7 +1842,8 @@ router.get('/api/messages', authRequired, async (req, res) => {
           END AS reply_preview,
           m.is_deleted,
           m.is_revoked,
-          m.timestamp
+          m.timestamp,
+          m.read_at
         FROM messages m
         LEFT JOIN messages r ON r.id = m.reply_to_id AND r.conversation_id = m.conversation_id
         WHERE m.conversation_id = ? AND m.is_deleted = 0 AND m.id > ?
@@ -1749,7 +1884,8 @@ router.get('/api/messages', authRequired, async (req, res) => {
           END AS reply_preview,
           m.is_deleted,
           m.is_revoked,
-          m.timestamp
+          m.timestamp,
+          m.read_at
         FROM messages m
         LEFT JOIN messages r ON r.id = m.reply_to_id AND r.conversation_id = m.conversation_id
         WHERE m.conversation_id = ? AND m.is_deleted = 0 AND m.id < ?
@@ -1791,7 +1927,8 @@ router.get('/api/messages', authRequired, async (req, res) => {
           END AS reply_preview,
           m.is_deleted,
           m.is_revoked,
-          m.timestamp
+          m.timestamp,
+          m.read_at
         FROM messages m
         LEFT JOIN messages r ON r.id = m.reply_to_id AND r.conversation_id = m.conversation_id
         WHERE m.conversation_id = ? AND m.is_deleted = 0
@@ -1804,6 +1941,7 @@ router.get('/api/messages', authRequired, async (req, res) => {
     }
     for (const r of rows || []) {
       if (r && r.timestamp) r.timestamp = toChinaTimeString(r.timestamp);
+      if (r && r.read_at) r.read_at = toChinaTimeString(r.read_at);
     }
     return res.json({ messages: rows });
   } catch (_) {

@@ -35,16 +35,20 @@ class _LoginPageState extends State<LoginPage> {
     required Map<String, dynamic> body,
   }) async {
     final Uri url = Uri.parse('https://fenghuomixin.online/api/auth/login');
-    final http.Response res = await http.post(
-      url,
-      headers: const {'Content-Type': 'application/json'},
-      body: jsonEncode(body),
-    ).timeout(const Duration(seconds: 12));
+    final http.Response res = await http
+        .post(
+          url,
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode(body),
+        )
+        .timeout(const Duration(seconds: 12));
 
     Map<String, dynamic> jsonBody;
     try {
       final dynamic decoded = jsonDecode(res.body);
-      jsonBody = decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
+      jsonBody = decoded is Map<String, dynamic>
+          ? decoded
+          : <String, dynamic>{};
     } catch (_) {
       jsonBody = <String, dynamic>{};
     }
@@ -53,13 +57,14 @@ class _LoginPageState extends State<LoginPage> {
       return jsonBody;
     }
 
-    final String message =
-        (jsonBody['message'] ?? jsonBody['error'] ?? '登录失败').toString();
+    final String message = (jsonBody['message'] ?? jsonBody['error'] ?? '登录失败')
+        .toString();
     throw Exception(message);
   }
 
   String? _extractToken(Map<String, dynamic> json) {
-    final dynamic token = json['token'] ??
+    final dynamic token =
+        json['token'] ??
         json['accessToken'] ??
         (json['data'] is Map ? (json['data'] as Map)['token'] : null) ??
         (json['data'] is Map ? (json['data'] as Map)['accessToken'] : null);
@@ -79,6 +84,52 @@ class _LoginPageState extends State<LoginPage> {
             : null);
     if (userId == null) return null;
     return userId.toString();
+  }
+
+  bool _isSocketException(Object e) {
+    return e.runtimeType.toString() == 'SocketException';
+  }
+
+  bool _isHandshakeException(Object e) {
+    return e.runtimeType.toString() == 'HandshakeException';
+  }
+
+  bool _isRetriableLoginException(Object e) {
+    return e is http.ClientException ||
+        _isSocketException(e) ||
+        _isHandshakeException(e);
+  }
+
+  String _loginErrorMessage(Object e) {
+    if (e is TimeoutException) {
+      return '网络超时，请稍后重试';
+    }
+    if (_isSocketException(e)) {
+      return '网络连接失败，请检查网络';
+    }
+    if (_isHandshakeException(e)) {
+      return '网络连接异常，请稍后重试';
+    }
+    if (e is http.ClientException) {
+      return '请求失败，请稍后重试';
+    }
+    final String raw = e.toString();
+    if (raw.startsWith('Exception: ')) {
+      return raw.replaceFirst('Exception: ', '');
+    }
+    return '登录失败，请稍后重试';
+  }
+
+  Future<Map<String, dynamic>> _postLoginWithRetry({
+    required Map<String, dynamic> body,
+  }) async {
+    try {
+      return await _postLogin(body: body);
+    } catch (e) {
+      if (!_isRetriableLoginException(e)) rethrow;
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      return _postLogin(body: body);
+    }
   }
 
   Future<void> _login() async {
@@ -101,11 +152,11 @@ class _LoginPageState extends State<LoginPage> {
     try {
       Map<String, dynamic> result;
       try {
-        result = await _postLogin(
+        result = await _postLoginWithRetry(
           body: {'username': account, 'password': password},
         );
       } catch (_) {
-        result = await _postLogin(
+        result = await _postLoginWithRetry(
           body: {'account': account, 'password': password},
         );
       }
@@ -125,10 +176,18 @@ class _LoginPageState extends State<LoginPage> {
         await SignalService.instance.connect();
       } catch (_) {}
       Get.offAllNamed('/');
-    } on TimeoutException {
-      Get.snackbar('登录失败', '网络超时，请稍后重试');
-    } catch (e) {
-      Get.snackbar('登录失败', e.toString().replaceFirst('Exception: ', ''));
+    } on TimeoutException catch (e, stackTrace) {
+      debugPrint('LoginPage._login TimeoutException: $e');
+      debugPrintStack(stackTrace: stackTrace);
+      Get.snackbar('登录失败', _loginErrorMessage(e));
+    } on http.ClientException catch (e, stackTrace) {
+      debugPrint('LoginPage._login ClientException: $e');
+      debugPrintStack(stackTrace: stackTrace);
+      Get.snackbar('登录失败', _loginErrorMessage(e));
+    } catch (e, stackTrace) {
+      debugPrint('LoginPage._login error: $e');
+      debugPrintStack(stackTrace: stackTrace);
+      Get.snackbar('登录失败', _loginErrorMessage(e));
     } finally {
       if (mounted) {
         setState(() {
@@ -191,7 +250,9 @@ class _LoginPageState extends State<LoginPage> {
                           color: const Color(0xFFB8960C),
                           width: 1,
                         ),
-                        borderRadius: const BorderRadius.all(Radius.circular(20)),
+                        borderRadius: const BorderRadius.all(
+                          Radius.circular(20),
+                        ),
                       ),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
@@ -261,8 +322,9 @@ class _LoginPageState extends State<LoginPage> {
                                 backgroundColor: const Color(0xFFC62828),
                                 foregroundColor: Colors.white,
                                 shape: const RoundedRectangleBorder(
-                                  borderRadius:
-                                      BorderRadius.all(Radius.circular(12)),
+                                  borderRadius: BorderRadius.all(
+                                    Radius.circular(12),
+                                  ),
                                 ),
                                 textStyle: const TextStyle(
                                   fontSize: 16,
@@ -285,7 +347,9 @@ class _LoginPageState extends State<LoginPage> {
                                 },
                                 activeColor: const Color(0xFFB8960C),
                                 checkColor: const Color(0xFF080C14),
-                                side: const BorderSide(color: Color(0xFF8B8B8B)),
+                                side: const BorderSide(
+                                  color: Color(0xFF8B8B8B),
+                                ),
                               ),
                               Expanded(
                                 child: Wrap(
@@ -301,15 +365,12 @@ class _LoginPageState extends State<LoginPage> {
                                     ),
                                     InkWell(
                                       onTap: () {
-                                        _showTextDialog(
-                                          '用户协议',
-                                          const [
-                                            '禁止发布违法、暴力、色情、诈骗、侵权等内容',
-                                            '禁止骚扰、威胁他人或传播恶意信息',
-                                            '违规将删除内容并可能永久封禁账号',
-                                            '用户对其发布内容承担相应责任',
-                                          ],
-                                        );
+                                        _showTextDialog('用户协议', const [
+                                          '禁止发布违法、暴力、色情、诈骗、侵权等内容',
+                                          '禁止骚扰、威胁他人或传播恶意信息',
+                                          '违规将删除内容并可能永久封禁账号',
+                                          '用户对其发布内容承担相应责任',
+                                        ]);
                                       },
                                       child: const Text(
                                         '《用户协议》',
@@ -330,15 +391,12 @@ class _LoginPageState extends State<LoginPage> {
                                     ),
                                     InkWell(
                                       onTap: () {
-                                        _showTextDialog(
-                                          '隐私政策',
-                                          const [
-                                            '仅收集提供服务所需的最小信息',
-                                            '相册/相机权限用于发送图片消息',
-                                            '麦克风权限用于语音通话',
-                                            '可随时注销账号并删除数据',
-                                          ],
-                                        );
+                                        _showTextDialog('隐私政策', const [
+                                          '仅收集提供服务所需的最小信息',
+                                          '相册/相机权限用于发送图片消息',
+                                          '麦克风权限用于语音通话',
+                                          '可随时注销账号并删除数据',
+                                        ]);
                                       },
                                       child: const Text(
                                         '《隐私政策》',

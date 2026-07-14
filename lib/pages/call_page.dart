@@ -96,10 +96,59 @@ class _CallPageState extends State<CallPage> {
   bool _muted = false;
   bool _speakerOn = false;
   bool _ringing = false;
+  bool _exitingPage = false;
 
   Timer? _timer;
   int _seconds = 0;
   StreamSubscription? _signalSub;
+
+  bool _shouldPreserveRtcOnExit() {
+    return CallService.instance.isInCall();
+  }
+
+  int? _prepareMinimizedExit() {
+    if (!_shouldPreserveRtcOnExit()) return null;
+    final int startedAt =
+        DateTime.now().millisecondsSinceEpoch - (_seconds * 1000);
+    CallService.instance.setMinimized(true);
+    SignalService.instance.showCallOverlay(
+      peerId: widget.peerId,
+      peerName: _peerDisplayName,
+      callId: widget.callId,
+      channelId: widget.channelId,
+      startedAtMs: startedAt,
+    );
+    return startedAt;
+  }
+
+  void _exitCallPage() {
+    final int? startedAt = _prepareMinimizedExit();
+    if (_shouldPreserveRtcOnExit()) {
+      if (_exitingPage) return;
+      setState(() {
+        _exitingPage = true;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          Get.back();
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!CallService.instance.isMinimized() || startedAt == null) {
+              return;
+            }
+            SignalService.instance.showCallOverlay(
+              peerId: widget.peerId,
+              peerName: _peerDisplayName,
+              callId: widget.callId,
+              channelId: widget.channelId,
+              startedAtMs: startedAt,
+            );
+          });
+        }
+      });
+      return;
+    }
+    Get.back();
+  }
 
   @override
   void initState() {
@@ -310,17 +359,7 @@ class _CallPageState extends State<CallPage> {
 
   void _minimize() {
     if (_state != _CallUiState.inCall) return;
-    final int startedAt =
-        DateTime.now().millisecondsSinceEpoch - (_seconds * 1000);
-    CallService.instance.setMinimized(true);
-    SignalService.instance.showCallOverlay(
-      peerId: widget.peerId,
-      peerName: _peerDisplayName,
-      callId: widget.callId,
-      channelId: widget.channelId,
-      startedAtMs: startedAt,
-    );
-    Get.back();
+    _exitCallPage();
   }
 
   Future<void> _toggleMute() async {
@@ -390,8 +429,7 @@ class _CallPageState extends State<CallPage> {
 
   void _updateRingtone() {
     if (kIsWeb) return;
-    final bool shouldRing =
-        _state == _CallUiState.outgoing || _state == _CallUiState.incoming;
+    final bool shouldRing = _state == _CallUiState.outgoing;
     if (shouldRing) {
       _startRingtone();
     } else {
@@ -444,54 +482,61 @@ class _CallPageState extends State<CallPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0D1321),
-      body: SafeArea(
-        child: Column(
-          children: [
-            const SizedBox(height: 28),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Row(
-                children: [
-                  const SizedBox(width: 44),
-                  Expanded(
-                    child: Text(
-                      _peerDisplayName,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 28,
-                        fontWeight: FontWeight.w700,
+    return PopScope(
+      canPop: _exitingPage || !_shouldPreserveRtcOnExit(),
+      onPopInvokedWithResult: (bool didPop, dynamic result) {
+        if (didPop) return;
+        _exitCallPage();
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFF0D1321),
+        body: SafeArea(
+          child: Column(
+            children: [
+              const SizedBox(height: 28),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Row(
+                  children: [
+                    const SizedBox(width: 44),
+                    Expanded(
+                      child: Text(
+                        _peerDisplayName,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 28,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                     ),
-                  ),
-                  SizedBox(
-                    width: 44,
-                    child: _state == _CallUiState.inCall
-                        ? IconButton(
-                            onPressed: _minimize,
-                            icon: const Icon(
-                              Icons.open_in_new_rounded,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const SizedBox.shrink(),
-                  ),
-                ],
+                    SizedBox(
+                      width: 44,
+                      child: _state == _CallUiState.inCall
+                          ? IconButton(
+                              onPressed: _minimize,
+                              icon: const Icon(
+                                Icons.open_in_new_rounded,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              _statusText(),
-              style: const TextStyle(color: Color(0xFFB0B0B0), fontSize: 14),
-            ),
-            const Spacer(),
-            Padding(
-              padding: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
-              child: _buildActions(),
-            ),
-          ],
+              const SizedBox(height: 10),
+              Text(
+                _statusText(),
+                style: const TextStyle(color: Color(0xFFB0B0B0), fontSize: 14),
+              ),
+              const Spacer(),
+              Padding(
+                padding: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
+                child: _buildActions(),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -571,7 +616,7 @@ class _CallPageState extends State<CallPage> {
             icon: Icons.arrow_back,
             label: '返回',
             onPressed: () {
-              Get.back();
+              _exitCallPage();
             },
             backgroundColor: const Color(0xFF1A2236),
             iconColor: Colors.white,
